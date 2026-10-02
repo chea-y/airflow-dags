@@ -1,5 +1,6 @@
 # ── 필요한 도구 불러오기 ──────────────────────────────
 from datetime import datetime, timedelta
+import json                                # 원본을 JSON 문자열로 바꾸는 도구
 import xml.etree.ElementTree as ET        # XML 응답 읽는 도구
 
 import requests                            # API 요청 도구
@@ -12,7 +13,9 @@ REGIONS = ["서울특별시", "경기도", "인천광역시", "부산광역시",
 
 CONN_ID = "my_postgres"                    # Airflow에 등록한 회사 DB 접속 정보
 SCHEMA = "airfy"                           # 저장할 스키마 (소문자라 따옴표 불필요)
-TABLE = f"{SCHEMA}.er_beds_snapshot"       # 최종 테이블: airfy.er_beds_snapshot
+TABLE = f"{SCHEMA}.er_beds_snapshot"       # 정리본 테이블: airfy.er_beds_snapshot
+RAW_TABLE = f"{SCHEMA}.er_beds_raw"        # 원본 테이블: airfy.er_beds_raw
+# ※ 두 테이블과 뷰는 DBeaver에서 미리 생성함 (DAG에서는 CREATE 안 함)
 
 
 def to_int(value):
@@ -23,9 +26,14 @@ def to_int(value):
         return None
 
 
+def kst_snapshot_at(data_interval_end):
+    """수집 기준 시각 (한국 시간). 같은 실행을 다시 돌려도 같은 값 → 멱등성"""
+    return data_interval_end.in_timezone("Asia/Seoul").strftime("%Y-%m-%d %H:%M:%S")
+
+
 # ── DAG 정의 ──────────────────────────────────────────
 @dag(
-    dag_id="er_beds_etl",
+    dag_id="er_beds_collect",
     start_date=datetime(2026, 9, 1),
     schedule="0 * * * *",                  # 매시 정각 실행
     catchup=False,                         # 지난 시간은 몰아서 실행 안 함
@@ -33,9 +41,9 @@ def to_int(value):
         "retries": 2,                      # 실패 시 2번 재시도
         "retry_delay": timedelta(minutes=3),  # 재시도 간격 3분
     },
-    tags=["medical", "etl"],
+    tags=["medical", "etl", "dify"],
 )
-def er_beds_etl():
+def er_beds_collect():
 
     # ── E: 지역별 수집 (지역 수만큼 태스크 자동 생성) ──
     @task
@@ -70,11 +78,26 @@ def er_beds_etl():
         print(f"[{region}] {len(items)}개 기관 수집")
         return items
 
+    # ── 원본 저장: 지역별 API 결과를 그대로 JSONB로 ──
+    @task
+    def save_raw(results, data_interval_end=None):
+        snapshot_at = kst_snapshot_at(data_interval_end)
+        # 매핑 결과는 REGIONS 순서와 같아서 zip으로 지역을 짝지을 수 있음
+        rows = [(snapshot_at, region, json.dumps(items, ensure_ascii=False))
+                for region, items in zip(REGIONS, results)]
+        PostgresHook(postgres_conn_id=CONN_ID).insert_rows(
+            table=RAW_TABLE,
+            rows=rows,
+            target_fields=["snapshot_at", "region", "payload"],
+            replace=True,                          # 같은 시각+지역이면 덮어쓰기
+            replace_index=["snapshot_at", "region"],
+        )
+        print(f"원본 {len(rows)}개 지역 저장 → {RAW_TABLE}")
+
     # ── T: 지역 결과 합치기 + 정리 + 파생 컬럼 ──────────
     @task
     def transform(results, data_interval_end=None):
-        # 수집 기준 시각 (한국 시간). 같은 실행을 다시 돌려도 같은 값 → 멱등성
-        snapshot_at = data_interval_end.in_timezone("Asia/Seoul").strftime("%Y-%m-%d %H:%M:%S")
+        snapshot_at = kst_snapshot_at(data_interval_end)
 
         rows = []
         for items in results:                          # 지역별 리스트를
@@ -122,21 +145,6 @@ def er_beds_etl():
     @task
     def load(rows):
         hook = PostgresHook(postgres_conn_id=CONN_ID)
-        hook.run(f"""
-            CREATE TABLE IF NOT EXISTS {TABLE} (
-                snapshot_at    TIMESTAMP,     -- 수집 기준 시각
-                hpid           VARCHAR(20),   -- 기관 ID
-                region         VARCHAR(20),   -- 시/도
-                name           VARCHAR(100),  -- 병원 이름
-                tel            VARCHAR(30),   -- 응급실 전화
-                available      INT,           -- 남은 병상
-                total          INT,           -- 기준 병상
-                available_rate REAL,          -- 가용률(%)
-                status         VARCHAR(10),   -- 포화/혼잡/여유
-                updated_at     VARCHAR(20),   -- 병원 입력 시각
-                PRIMARY KEY (hpid, snapshot_at)
-            )
-        """)
         fields = ["snapshot_at", "hpid", "region", "name", "tel",
                   "available", "total", "available_rate", "status", "updated_at"]
         hook.insert_rows(
@@ -168,8 +176,9 @@ def er_beds_etl():
 
     # ── 실행 순서 ────────────────────────────────────
     raw = extract.expand(region=REGIONS)      # 지역 5개 → 태스크 5개 동시 실행
+    save_raw(raw)                             # 원본 저장 (정리 흐름과 병렬)
     rows = check_quality(transform(raw))
     load(rows) >> report()                    # 적재 끝나면 리포트
 
 
-er_beds_etl()
+er_beds_collect()

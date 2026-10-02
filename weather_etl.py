@@ -9,8 +9,8 @@ from airflow.providers.postgres.hooks.postgres import PostgresHook  # PostgreSQL
 
 DATA_DIR = "/opt/airflow/data"             # CSV 저장 폴더 (= 내 PC의 ~/data)
 CONN_ID = "my_postgres"                    # Airflow에 등록한 DB 접속 정보 이름
-SCHEMA = '"GDB"'                           # 저장할 스키마 (대문자라서 큰따옴표 필수)
-TABLE = f"{SCHEMA}.weather_hourly"         # 최종 테이블 이름: "GDB".weather_hourly
+SCHEMA = "airfy"                           # 저장할 스키마 (소문자라 따옴표 불필요)
+TABLE = f"{SCHEMA}.weather_hourly"         # 최종 테이블 이름: airfy.weather_hourly
 
 
 # ── DAG 정의 ──────────────────────────────────────────
