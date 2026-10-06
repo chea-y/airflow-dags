@@ -8,6 +8,7 @@ from email.utils import formataddr
 
 import pendulum                            # 시간대(한국 시간) 처리 도구
 import requests                            # API 요청 도구
+from airflow.datasets import Dataset       # DAG 간 연결 신호
 from airflow.decorators import dag, task
 from airflow.hooks.base import BaseHook    # Connection 정보 꺼내는 도구
 from airflow.models import Variable
@@ -23,6 +24,7 @@ SCHEMA = "airfy"
 SNAPSHOT = f"{SCHEMA}.er_beds_snapshot"
 REGION_HOURLY = f"{SCHEMA}.v_er_beds_region_hourly"
 REPORT_TABLE = f"{SCHEMA}.er_report_daily"
+ER_REPORT_DATASET = Dataset("airfy://er_report_daily")   # "리포트 갱신됨" 신호 이름
 
 # 집계 기간 조건: (시작, 끝] → 09시~다음날 08시 = 24회
 WINDOW = "snapshot_at > %(start)s AND snapshot_at <= %(end)s"
@@ -174,13 +176,16 @@ def er_daily_report():
         }
 
     # ── 4. 리포트 DB 저장 (같은 날짜는 덮어쓰기) ──────────
-    @task
+    #   outlets: 이 태스크가 성공하면 "리포트 갱신됨" 신호 → er_report_kb_sync 자동 실행
+    @task(outlets=[ER_REPORT_DATASET])
     def save_report(meta, result):
         fields = ["report_date", "period_start", "period_end", "snapshots",
-                  "summary_json", "report_text", "dify_run_id", "total_tokens"]
+                  "summary_json", "report_text", "dify_run_id", "total_tokens",
+                  "kb_synced_at"]                                # NULL로 초기화 → 지식베이스 재동기화 대상
         row = (meta["report_date"], meta["period_start"], meta["period_end"],
                meta["snapshots"], meta["summary_json"],
-               result["report"], result["run_id"], result["tokens"])
+               result["report"], result["run_id"], result["tokens"],
+               None)
         PostgresHook(postgres_conn_id=CONN_ID).insert_rows(
             table=REPORT_TABLE,
             rows=[row],
