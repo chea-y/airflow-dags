@@ -10,6 +10,7 @@ from airflow.decorators import dag, task
 from airflow.exceptions import AirflowSkipException   # 태스크를 '실패' 대신 '건너뜀'으로 끝내는 도구
 from airflow.hooks.base import BaseHook
 from airflow.providers.postgres.hooks.postgres import PostgresHook
+from common.ops import DEFAULT_ARGS, notify_dag_failure
 
 KST = "Asia/Seoul"
 CONN_ID = "my_postgres"
@@ -81,7 +82,9 @@ def build_document(r):
     schedule=[ER_REPORT_DATASET],          # 시간표 대신 "리포트 갱신됨" 신호로 실행
     catchup=False,
     max_active_runs=1,
-    params={"limit": 30},                  # 한 번에 올릴 최대 리포트 수
+    default_args=DEFAULT_ARGS,
+    on_failure_callback=notify_dag_failure,
+    params={"limit": 30},                  # 한 번에 올릴 최대 리포트 수                  # 한 번에 올릴 최대 리포트 수
     tags=["medical", "dify", "knowledge"],
 )
 def er_report_kb_sync():
@@ -118,6 +121,7 @@ def er_report_kb_sync():
         retry_delay=timedelta(minutes=1),
         execution_timeout=timedelta(minutes=5),
         max_active_tis_per_dagrun=1,       # 한 번에 1건씩 (Dify 호출 몰림 방지)
+        pool="dify_api",                   # 리포트 생성과 겹쳐도 Dify는 동시에 2개까지만
     )
     def sync_report(report):
         hook = PostgresHook(postgres_conn_id=CONN_ID)

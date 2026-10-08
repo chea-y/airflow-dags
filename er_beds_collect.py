@@ -7,6 +7,7 @@ import requests                            # API 요청 도구
 from airflow.decorators import dag, task
 from airflow.models import Variable       # Airflow에 저장한 API 키 꺼내는 도구
 from airflow.providers.postgres.hooks.postgres import PostgresHook  # DB 접속 도구
+from common.ops import DEFAULT_ARGS, notify_dag_failure   # 공통 재시도 설정 + 실패 알림
 
 API_URL = "http://apis.data.go.kr/B552657/ErmctInfoInqireService/getEmrrmRltmUsefulSckbdInfoInqire"
 REGIONS = ["서울특별시", "경기도", "인천광역시", "부산광역시", "대구광역시"]  # 수집할 지역
@@ -37,16 +38,14 @@ def kst_snapshot_at(data_interval_end):
     start_date=datetime(2026, 9, 1),
     schedule="0 * * * *",                  # 매시 정각 실행
     catchup=False,                         # 지난 시간은 몰아서 실행 안 함
-    default_args={
-        "retries": 2,                      # 실패 시 2번 재시도
-        "retry_delay": timedelta(minutes=3),  # 재시도 간격 3분
-    },
+    default_args=DEFAULT_ARGS,                 # 공통 재시도: 최대 3번, 1분→2분→4분 간격
+    on_failure_callback=notify_dag_failure,    # 최종 실패 시 메일 1통
     tags=["medical", "etl", "dify"],
 )
 def er_beds_collect():
 
     # ── E: 지역별 수집 (지역 수만큼 태스크 자동 생성) ──
-    @task
+    @task(pool="data_go_kr")                   # 공공데이터 API는 동시에 3개까지만
     def extract(region):
         params = {
             "serviceKey": Variable.get("data_go_kr_key"),  # 키는 Variable에서 꺼냄

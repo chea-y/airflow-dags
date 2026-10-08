@@ -13,6 +13,7 @@ from airflow.decorators import dag, task
 from airflow.hooks.base import BaseHook    # Connection 정보 꺼내는 도구
 from airflow.models import Variable
 from airflow.providers.postgres.hooks.postgres import PostgresHook
+from common.ops import DEFAULT_ARGS, notify_dag_failure
 
 KST = "Asia/Seoul"
 CONN_ID = "my_postgres"                    # 회사 DB
@@ -48,10 +49,8 @@ def resolve_window(data_interval_end, params):
     schedule="0 8 * * *",                  # 매일 08:00 (한국 시간)
     catchup=False,
     max_active_runs=1,
-    default_args={
-        "retries": 1,
-        "retry_delay": timedelta(minutes=3),
-    },
+    default_args=DEFAULT_ARGS,
+    on_failure_callback=notify_dag_failure,
     params={
         "window_end": None,                # 테스트용: "2026-10-03 08:00:00" 형식
         "min_snapshots": 12,               # 24회 중 최소 12회 이상 수집돼야 발송
@@ -144,6 +143,7 @@ def er_daily_report():
         retries=3,
         retry_delay=timedelta(seconds=30),
         execution_timeout=timedelta(minutes=3),
+        pool="dify_api",                       # Dify는 동시에 2개까지만
     )
     def call_dify(meta):
         conn = BaseHook.get_connection(DIFY_CONN_ID)
